@@ -1,0 +1,157 @@
+# Train / evaluate XGBoost on ExtractedPTrainTest.csv (80/20), then do interactive inference
+
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, confusion_matrix
+
+# --- XGBoost import (friendly message if it's missing) ---
+try:
+    from xgboost import XGBClassifier
+except ImportError as e:
+    raise ImportError(
+        "xgboost is not installed. Please install it first, e.g.:\n"
+        "  pip install xgboost\n"
+        "or\n"
+        "  conda install -c conda-forge xgboost"
+    ) from e
+
+# ---------- 1) Load data ----------
+in_path = "data/ExtractedPTrainTest.csv"
+df = pd.read_csv(in_path, sep=";")
+
+# Find Target column (case-insensitive)
+target_col = next((c for c in df.columns if c.strip().lower() == "target"), None)
+if target_col is None:
+    raise KeyError("Couldn't find a 'Target' column (case-insensitive).")
+
+# Ensure binary target {0,1}; map labels if needed; drop any rows with class 2 if present
+y_num = pd.to_numeric(df[target_col], errors="coerce")
+if y_num.isna().any():
+    label_to_code = {"dropout": 0, "graduate": 1, "enrolled": 2}
+    y_num = df[target_col].astype(str).str.strip().str.lower().map(label_to_code)
+df[target_col] = y_num.astype(int)
+df = df[df[target_col].isin([0, 1])].copy()
+
+# Split features/labels
+X = df.drop(columns=[target_col])
+y = df[target_col].astype(int)
+
+# Identify column types
+numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+categorical_cols = [c for c in X.columns if c not in numeric_cols]
+
+# ---------- 2) Build pipeline ----------
+numeric_tf = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+])
+
+categorical_tf = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("ohe", OneHotEncoder(handle_unknown="ignore")),
+])
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("num", numeric_tf, numeric_cols),
+        ("cat", categorical_tf, categorical_cols),
+    ],
+    remainder="drop",
+)
+
+# XGBoost classifier (reasonable starting point)
+xgb = XGBClassifier(
+    objective="binary:logistic",
+    n_estimators=500,        # number of boosting rounds (trees)
+    learning_rate=0.05,      # shrinkage; lower -> usually better but needs more trees
+    max_depth=6,             # tree depth; higher -> more complex, risk overfit
+    subsample=0.8,           # row sampling per tree
+    colsample_bytree=0.8,    # feature sampling per tree
+    min_child_weight=1.0,    # minimum sum hessian in child; higher -> more conservative
+    reg_lambda=1.0,          # L2 regularization
+    reg_alpha=0.0,           # L1 regularization
+    gamma=0.0,               # min loss reduction to split; >0 makes splitting harder
+    n_jobs=-1,
+    random_state=42,
+    tree_method="hist",      # fast on CPU; if GPU available, try "gpu_hist"
+    # scale_pos_weight will be set after we know class balance on the train split
+)
+
+pipe = Pipeline(steps=[
+    ("preprocess", preprocess),
+    ("xgb", xgb),
+])
+
+# ---------- 3) Train / test split (80/20 with stratify) ----------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+# OPTIONAL: handle class imbalance via scale_pos_weight = neg/pos on the TRAIN set
+neg = np.sum(y_train == 0)
+pos = np.sum(y_train == 1)
+if pos > 0:
+    spw = neg / pos
+    pipe.named_steps["xgb"].set_params(scale_pos_weight=spw)
+
+# ---------- 4) Fit & evaluate ----------
+pipe.fit(X_train, y_train)
+
+y_pred = pipe.predict(X_test)
+# predict_proba returns prob for class 1 in [:,1]
+y_proba = pipe.predict_proba(X_test)[:, 1]
+
+print("Accuracy:", f"{accuracy_score(y_test, y_pred):.4f}")
+print("\nClassification report:\n", classification_report(y_test, y_pred, digits=4))
+
+try:
+    auc = roc_auc_score(y_test, y_proba)
+    print("ROC-AUC:", f"{auc:.4f}")
+except Exception as e:
+    print("ROC-AUC could not be computed:", e)
+
+print("\nConfusion matrix:\n", confusion_matrix(y_test, y_pred))
+
+# ---------- 5) Interactive inference ----------
+# Prompts you for each original feature. Press Enter to leave blank (will be imputed).
+def infer_from_input(pipeline, feature_frame):
+    print("\nEnter values for a NEW student (press Enter to skip a field):")
+    record = {}
+    for col in feature_frame.columns:
+        if col in feature_frame.select_dtypes(include=[np.number]).columns:
+            prompt = f"{col} (numeric): "
+            raw = input(prompt)
+            if raw.strip() == "":
+                record[col] = np.nan
+            else:
+                try:
+                    record[col] = float(raw)
+                except:
+                    print(f"  Could not parse '{raw}', setting as NaN.")
+                    record[col] = np.nan
+        else:
+            # show up to 10 example categories
+            examples = feature_frame[col].dropna().astype(str).unique()[:10]
+            ex_str = ", ".join(map(str, examples))
+            prompt = f"{col} (categorical e.g. {ex_str}): "
+            raw = input(prompt)
+            record[col] = raw.strip() if raw.strip() != "" else np.nan
+
+    new_df = pd.DataFrame([record], columns=feature_frame.columns)
+    pred = pipeline.predict(new_df)[0]
+    proba = pipeline.predict_proba(new_df)[0]
+
+    label_map = {0: "Dropout", 1: "Graduate"}
+    label = label_map.get(int(pred), str(pred))
+
+    print("\nPrediction:", label)
+    print(f"Probability Graduate (class 1): {proba[1]:.4f} | Probability Dropout (class 0): {proba[0]:.4f}")
+
+# Call once for testing; you can re-run this function as needed
+# Comment out the next line if you don't want to be prompted immediately.
+# infer_from_input(pipe, X)
