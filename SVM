@@ -1,0 +1,97 @@
+# ==========================================
+# 📘 SVM MODEL - Student Dropout Prediction
+# ==========================================
+
+# Step 1: Import Libraries
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler, LabelEncoder, PowerTransformer
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, confusion_matrix, roc_curve
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Step 2: Load Dataset
+df = pd.read_csv("/content/ExtractedCTrainTest.csv", sep=";")
+
+# Step 3: Basic Preprocessing
+for col in df.select_dtypes(include=['object']).columns:
+    df[col] = LabelEncoder().fit_transform(df[col])
+
+X = df.drop('Target', axis=1)
+y = df['Target']
+
+# Step 4: Split Data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Step 5: Feature Scaling
+scaler = PowerTransformer()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# ==========================================
+# Step 6: SVM Model with Hyperparameter Tuning
+# ==========================================
+
+# Define SVM model with balanced class weights
+svm = SVC(class_weight='balanced', probability=True)
+
+# ✅ Corrected: Use param_grid_fine instead of param_grid
+param_grid_fine = {
+    'C': [5, 8, 10, 12, 15, 18],
+    'gamma': [0.03, 0.05, 0.08, 0.1, 0.12, 0.15],
+    'kernel': ['poly']
+}
+
+# Grid Search with 10-fold cross-validation
+grid_search = GridSearchCV(
+    estimator=svm,
+    param_grid=param_grid_fine,   # ✅ fixed variable name
+    scoring='accuracy',
+    cv=10,
+    verbose=2,
+    n_jobs=-1
+)
+
+# Train model
+grid_search.fit(X_train, y_train)
+
+# Best model
+best_svm = grid_search.best_estimator_
+print("\n✅ Best Hyperparameters:", grid_search.best_params_)
+
+# ==========================================
+# Step 7: Model Evaluation
+# ==========================================
+y_pred = best_svm.predict(X_test)
+y_prob = best_svm.predict_proba(X_test)[:, 1]
+
+acc = accuracy_score(y_test, y_pred)
+auc = roc_auc_score(y_test, y_prob)
+
+print(f"\n📊 Final Model Performance:")
+print(f"Accuracy : {acc:.4f}")
+print(f"ROC-AUC  : {auc:.4f}")
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
+
+# Confusion Matrix
+plt.figure(figsize=(5,4))
+sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues')
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.show()
+
+# ROC Curve
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+plt.figure(figsize=(6,5))
+plt.plot(fpr, tpr, label=f"AUC = {auc:.3f}")
+plt.plot([0,1],[0,1],'--',color='gray')
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve - SVM Model")
+plt.legend()
+plt.show()
