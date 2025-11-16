@@ -1,0 +1,44 @@
+import os
+import pandas as pd
+from sklearn.feature_selection import chi2
+from sklearn.preprocessing import MinMaxScaler
+
+# 0. 确保 data 文件夹存在
+os.makedirs("data", exist_ok=True)
+
+# 1. 正确读取 CSV（分号分隔）
+df = pd.read_csv("data/no_outliers_dropoutgraduate3.csv", sep=";")
+
+# 2. 分离 features 和 target
+X = df.drop(columns=["Target"])
+y = df["Target"]
+
+# 3. Chi-Square 要求非负数，所以做 MinMaxScaler 把数值缩放到 [0,1]
+scaler = MinMaxScaler()
+X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
+
+# 4. 计算 Chi-Square p-values
+chi_scores, p_values = chi2(X_scaled, y)
+
+# 5. 建立结果表格并排序（按 p-value 从小到大）
+results = pd.DataFrame({
+    "Feature": X_scaled.columns,
+    "Chi2 Score": chi_scores,
+    "p-value": p_values
+}).sort_values(by="p-value", ascending=True)
+
+# 6. 选择 p-value < 0.05 的 features
+selected_features = results[results["p-value"] < 0.05]["Feature"].tolist()
+
+print("Selected features (p < 0.05):")
+print(selected_features)
+
+# 7. 保存结果表格和选中特征（包含 Target），使用分号 ; 作为分隔符
+results.to_csv("data/no_outliers_Chi2Results3.csv", sep=";", index=False)   # 按 p-value 排序后的结果
+
+X_selected = X_scaled[selected_features]                       # 先取出选中的特征
+X_selected_with_target = pd.concat([X_selected, y], axis=1)    # 再加回 Target
+X_selected_with_target.to_csv("data/no_outliers_ExtractedC3.csv", sep=";", index=False)
+
+print("完成！已保存 Chi2Results.csv (排序后, 分号分隔) 和 ExtractedC.csv (包含 Target, 分号分隔)")
+
